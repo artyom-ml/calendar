@@ -3657,6 +3657,9 @@ function taskPct(a, b) {
 let hubFocusEx = null;
 
 function renderHub() {
+  // re-renders happen on every field change — keep the scroll position
+  const prevHub = main.querySelector(".hub");
+  const keepScroll = prevHub ? prevHub.scrollTop : 0;
   main.innerHTML = "";
   const hub = el("div", "hub");
   const inner = el("div", "hub-inner");
@@ -3707,6 +3710,7 @@ function renderHub() {
   cols.appendChild(left);
   cols.appendChild(hubTable ? buildHubTable() : buildHubCharts());
   inner.appendChild(cols);
+  hub.scrollTop = keepScroll;
 }
 
 /* ---------- stat tiles ---------- */
