@@ -4532,7 +4532,7 @@ const AI_SCHEMA = {
         additionalProperties: false,
         required: ["kind"],
         properties: {
-          kind: { type: "string", enum: ["create_event", "log_metric", "log_workout", "none"] },
+          kind: { type: "string", enum: ["create_event", "log_metric", "log_workout", "create_plan", "none"] },
           title: { type: "string" },
           date: { type: "string", description: "YYYY-MM-DD" },
           start: { type: "string", description: "HH:MM 24h" },
@@ -4543,7 +4543,24 @@ const AI_SCHEMA = {
           value: { type: "number" },
           workoutType: { type: "string", enum: ["weights", "soccer", "agility", "speed", "cardio"] },
           workoutName: { type: "string" },
-          mins: { type: "number" }
+          mins: { type: "number" },
+          planName: { type: "string", description: "create_plan: name of the recurring workout" },
+          days: { type: "array", items: { type: "integer" }, description: "create_plan: weekdays, Monday=0 … Sunday=6" },
+          durationMins: { type: "number" },
+          everyWeeks: { type: "integer", description: "create_plan: repeat cadence in weeks, usually 1" },
+          exercises: {
+            type: "array",
+            description: "create_plan: planned exercises with target set counts",
+            items: {
+              type: "object",
+              additionalProperties: false,
+              required: ["name", "sets"],
+              properties: {
+                name: { type: "string" },
+                sets: { type: "integer" }
+              }
+            }
+          }
         }
       }
     }
@@ -4617,6 +4634,31 @@ function applyAiActions(actions) {
         sets: [{ reps: null, wt: null, mins: typeof a.mins === "number" ? Math.max(0, Math.round(a.mins)) : null }],
       });
       applied.push(`workout “${a.workoutName || woTypeLabel(type)}” (${k})`);
+    } else if (a.kind === "create_plan") {
+      const type = WO_TYPES.some(t => t[0] === a.workoutType) ? a.workoutType : "weights";
+      const days = Array.isArray(a.days)
+        ? [...new Set(a.days.filter(d => Number.isInteger(d) && d >= 0 && d <= 6))].sort((x, y) => x - y)
+        : [];
+      const plan = {
+        id: uid(),
+        type,
+        name: (a.planName || a.title || woTypeLabel(type)).slice(0, 60),
+        days: days.length ? days : [(today.getDay() + 6) % 7],
+        sm: clamp(parseTimeInput(a.start || "", 1080), 0, 1440 - 15),
+        dur: clamp(Math.round(a.durationMins || 60), 15, 600),
+        interval: clamp(Math.round(a.everyWeeks || 1), 1, 8),
+        eventId: null,
+        exercises: Array.isArray(a.exercises)
+          ? a.exercises.slice(0, 20).map(x => ({
+              name: String(x && x.name || "").slice(0, 60),
+              sets: clamp(Math.round(x && x.sets || 3), 1, 20),
+            })).filter(x => x.name)
+          : [],
+      };
+      store.plans.push(plan);
+      syncPlanToCalendar(plan);
+      const dayNames = plan.days.map(d => DOWS_S[d]).join(", ");
+      applied.push(`workout plan “${plan.name}” (${dayNames} ${fmtTime(plan.sm)}${plan.exercises.length ? `, ${plan.exercises.length} exercises` : ""})`);
     }
   }
   return applied;
@@ -4645,11 +4687,16 @@ async function applyNoteWithAI(note) {
       "Rules: use create_event to book work described in the note into free time — pick slots that do not overlap the existing schedule, prefer 09:00–18:00 on the earliest reasonable day, and honor any timing the note states; mark to-dos as isTask true. " +
       "Use log_metric when the note reports calories eaten (metric cal, kcal), water drunk (metric water, litres), sleep (metric sleep, hours), or body weight (metric wt, kg). " +
       "Use log_workout when the note reports completed exercise. " +
+      "Use create_plan when the note asks to set up a recurring workout, training schedule, or program: choose workoutType, weekdays (Monday=0 … Sunday=6), a start time that avoids the existing schedule, durationMins, everyWeeks (usually 1), and an exercises list with target set counts. When the user asks you to design the program, design it — pick sensible exercises and set counts for their stated goal; emit one create_plan per distinct session (e.g. push day / pull day / leg day are three plans). Don't duplicate plans that already exist. " +
       "If the note needs nothing, return a single action of kind none and explain in the summary. " +
-      "Never invent facts that are not in the note. Keep the summary short and plain.";
+      "Never invent facts that are not in the note (except program design when asked). Keep the summary short and plain.";
+    const planLines = (store.plans || []).map(p =>
+      `${p.name || woTypeLabel(p.type)}: ${(p.days || []).map(d => DOWS_S[d]).join("/")} ${fmtTime(p.sm)} (${(p.exercises || []).map(x => `${x.name}×${x.sets}`).join(", ") || "no exercises listed"})`
+    );
     const userText =
       `Today is ${DOWS[(now.getDay() + 6) % 7]}, ${dkey(now)}, current time ${fmtTime(now.getHours() * 60 + now.getMinutes())}.\n\n` +
       `Schedule for the next 3 weeks:\n${lines.length ? lines.join("\n") : "(empty)"}\n\n` +
+      `Existing workout plans:\n${planLines.length ? planLines.join("\n") : "(none)"}\n\n` +
       `Today's habit log: ${logLine}\n\n` +
       `The user's note:\n"""\n${note.text}\n"""`;
 
