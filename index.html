@@ -1390,6 +1390,69 @@ g.hot .viz-bar { filter: brightness(1.15); }
   </div>
 </div>
 <script>
+/* Lock screen for the hosted site. Only the SHA-256 hash of the credentials
+   lives in this public file; the plaintext is never stored anywhere. */
+(function () {
+  var GATE_HOSTS = ["manulink.com", "github.io"];
+  var hostMatches = GATE_HOSTS.some(function (h) { return location.hostname === h || location.hostname.endsWith("." + h); });
+  if (!hostMatches) return; // local file, desktop app, artifact: no gate
+
+  var HASH = "080e34a2afb4bc80bca903f01c42a95b2f066f18f3e5f935e4caa019741cccbc";
+  var SALT = "manulink-cal-v1";
+  var FLAG = "artyom-calendar-gate";
+  if (localStorage.getItem(FLAG) === HASH) return;
+
+  var css = document.createElement("style");
+  css.textContent =
+    ".gate{position:fixed;inset:0;z-index:999;background:var(--bg);display:flex;align-items:center;justify-content:center;padding:20px}" +
+    ".gate-card{width:min(340px,100%);background:var(--surface);border:1px solid var(--line);border-radius:16px;box-shadow:var(--shadow-2);padding:28px 26px;display:flex;flex-direction:column;gap:12px}" +
+    ".gate-mark{width:44px;height:44px;border:1px solid var(--line);border-radius:10px;box-shadow:var(--shadow-1);display:flex;flex-direction:column;align-items:center;justify-content:center;margin-bottom:2px}" +
+    ".gate-mark .d{font-family:var(--font-display);font-size:20px;font-weight:600;line-height:1}" +
+    ".gate-mark .m{font-size:7px;font-weight:700;letter-spacing:.12em;color:var(--now)}" +
+    ".gate-title{font-family:var(--font-display);font-size:19px;font-weight:600}" +
+    ".gate-sub{font-size:13px;color:var(--muted);margin-top:-6px}" +
+    ".gate input{height:38px;padding:0 12px;border:1px solid var(--line);border-radius:8px;background:var(--surface-2);font-size:14px;width:100%}" +
+    ".gate input:focus{border-color:var(--accent);outline:none;background:var(--surface)}" +
+    ".gate button{height:38px;border-radius:8px;background:var(--accent);color:var(--accent-ink);font-weight:600;font-size:14px}" +
+    ".gate button:hover{filter:brightness(1.06)}" +
+    ".gate-err{font-size:12.5px;color:var(--danger);min-height:16px}";
+  document.head.appendChild(css);
+
+  var overlay = document.createElement("div");
+  overlay.className = "gate";
+  overlay.innerHTML =
+    '<form class="gate-card">' +
+    '<div class="gate-mark"><span class="m">PRIVATE</span><span class="d">31</span></div>' +
+    '<div class="gate-title">Calendar</div>' +
+    '<div class="gate-sub">This is a private app. Sign in to continue.</div>' +
+    '<input id="gateUser" type="text" placeholder="Username" autocomplete="username" autocapitalize="none">' +
+    '<input id="gatePass" type="password" placeholder="Password" autocomplete="current-password">' +
+    '<div class="gate-err" id="gateErr"></div>' +
+    '<button type="submit">Unlock</button>' +
+    "</form>";
+  document.body.appendChild(overlay);
+  var user = overlay.querySelector("#gateUser");
+  var pass = overlay.querySelector("#gatePass");
+  var err = overlay.querySelector("#gateErr");
+  setTimeout(function () { user.focus(); }, 50);
+
+  overlay.querySelector("form").addEventListener("submit", function (e) {
+    e.preventDefault();
+    var input = user.value.trim().toLowerCase() + ":" + pass.value + ":" + SALT;
+    crypto.subtle.digest("SHA-256", new TextEncoder().encode(input)).then(function (buf) {
+      var hex = Array.from(new Uint8Array(buf)).map(function (b) { return b.toString(16).padStart(2, "0"); }).join("");
+      if (hex === HASH) {
+        localStorage.setItem(FLAG, HASH);
+        overlay.remove();
+        css.remove();
+      } else {
+        err.textContent = "That username or password isn't right.";
+        pass.value = "";
+        pass.focus();
+      }
+    });
+  });
+})();
 "use strict";
 
 /* ============================================================
