@@ -1263,6 +1263,16 @@ g.hot .viz-bar { filter: brightness(1.15); }
 .note-actions { display: flex; gap: 6px; }
 .note-actions .btn { height: 28px; padding: 0 11px; font-size: 12.5px; }
 .note-item.busy { opacity: 0.6; pointer-events: none; }
+.spinner {
+  width: 14px; height: 14px; flex: 0 0 auto;
+  border: 2px solid var(--line);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+.note-busy-txt { font-size: 12px; color: var(--muted); }
+.note-result.err { color: var(--danger); border-top-color: color-mix(in srgb, var(--danger) 30%, transparent); }
 .notes-empty { color: var(--faint); font-size: 12.5px; text-align: center; padding: 16px 0; }
 .drawer-foot { display: flex; flex-direction: column; gap: 6px; border-top: 1px solid var(--line-soft); padding-top: 10px; }
 .api-row { display: flex; gap: 6px; }
@@ -4447,6 +4457,10 @@ function setAiStatus(msg, cls) {
   n.className = "drawer-note" + (cls ? " " + cls : "");
 }
 
+/* transient per-note UI state — kept out of the synced store on purpose */
+var noteBusy = {};
+var noteErrs = {};
+
 function renderNotes() {
   const list = $("notesList");
   list.innerHTML = "";
@@ -4457,24 +4471,32 @@ function renderNotes() {
   }
   for (const note of notes) {
     const item = el("div", "note-item");
+    const busy = !!noteBusy[note.id];
     item.appendChild(el("div", "note-text", note.text));
     const meta = el("div", "note-meta");
     meta.appendChild(el("span", "note-when", note.created || ""));
-    meta.appendChild(el("span", "note-chip " + note.status, note.status === "applied" ? "Applied" : "Pending"));
+    meta.appendChild(el("span", "note-chip " + (busy ? "pending" : note.status), busy ? "Working" : note.status === "applied" ? "Applied" : "Pending"));
     item.appendChild(meta);
     if (note.result) item.appendChild(el("div", "note-result", note.result));
+    if (noteErrs[note.id] && !busy) item.appendChild(el("div", "note-result err", noteErrs[note.id]));
     const actions = el("div", "note-actions");
-    if (note.status === "pending") {
-      const apply = el("button", "btn btn-primary", "Apply with Claude");
-      apply.addEventListener("click", () => applyNoteWithAI(note, item));
-      actions.appendChild(apply);
+    if (busy) {
+      actions.appendChild(el("span", "spinner"));
+      actions.appendChild(el("span", "note-busy-txt", "Asking Claude — usually 10–30 seconds…"));
+    } else {
+      if (note.status === "pending") {
+        const apply = el("button", "btn btn-primary", noteErrs[note.id] ? "Try again" : "Apply with Claude");
+        apply.addEventListener("click", () => applyNoteWithAI(note));
+        actions.appendChild(apply);
+      }
+      const del = el("button", "btn btn-ghost", "Delete");
+      del.addEventListener("click", () => {
+        store.notes = store.notes.filter(n => n.id !== note.id);
+        delete noteErrs[note.id];
+        saveStore(); renderNotes();
+      });
+      actions.appendChild(del);
     }
-    const del = el("button", "btn btn-ghost", "Delete");
-    del.addEventListener("click", () => {
-      store.notes = store.notes.filter(n => n.id !== note.id);
-      saveStore(); renderNotes();
-    });
-    actions.appendChild(del);
     item.appendChild(actions);
     list.appendChild(item);
   }
@@ -4600,9 +4622,9 @@ function applyAiActions(actions) {
   return applied;
 }
 
-async function applyNoteWithAI(note, itemEl) {
+async function applyNoteWithAI(note) {
   if (location.hostname.endsWith("claude.ai") || location.hostname.endsWith("claudeusercontent.com")) {
-    setAiStatus("AI processing needs the local app (calendar.html on your desktop) — this hosted page can't reach external APIs.", "err");
+    setAiStatus("AI processing needs the app at calendar.manulink.com or on your desktop — this preview can't reach external APIs.", "err");
     return;
   }
   if (!aiKey()) {
@@ -4610,8 +4632,10 @@ async function applyNoteWithAI(note, itemEl) {
     $("apiKey").focus();
     return;
   }
-  itemEl.classList.add("busy");
-  setAiStatus("Asking Claude…");
+  noteBusy[note.id] = true;
+  delete noteErrs[note.id];
+  renderNotes();
+  setAiStatus("");
   try {
     const now = new Date();
     const { lines, logLine } = scheduleContext();
@@ -4632,6 +4656,7 @@ async function applyNoteWithAI(note, itemEl) {
     const result = await callClaude(systemPrompt, userText);
     pushUndo();
     const applied = applyAiActions(result.actions);
+    delete noteBusy[note.id];
     note.status = "applied";
     note.result = (result.summary || "Done.") + (applied.length ? ` — ${applied.length} change${applied.length === 1 ? "" : "s"} made.` : " — no changes were needed.");
     saveStore();
@@ -4640,12 +4665,12 @@ async function applyNoteWithAI(note, itemEl) {
     setAiStatus("", "");
     showToast(applied.length ? `Claude applied ${applied.length} change${applied.length === 1 ? "" : "s"}` : "Claude made no changes", { action: applied.length ? "Undo" : null, onAction: popUndo });
   } catch (err) {
-    const msg = err instanceof TypeError
-      ? "Could not reach the API. If you're on the hosted page, AI processing needs the local desktop app (calendar.html)."
-      : (err && err.message ? err.message : "Something went wrong.");
-    setAiStatus(msg, "err");
+    noteErrs[note.id] = err instanceof TypeError
+      ? "Couldn't reach the API — check your connection and try again."
+      : (err && err.message ? err.message : "Something went wrong — try again.");
   } finally {
-    itemEl.classList.remove("busy");
+    delete noteBusy[note.id];
+    renderNotes();
   }
 }
 
