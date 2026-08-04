@@ -1114,6 +1114,7 @@ g.hot .viz-bar { filter: brightness(1.15); }
 .api-row .btn { height: 31px; padding: 0 12px; font-size: 12.5px; }
 .drawer-note { font-size: 11px; color: var(--faint); line-height: 1.4; }
 .data-row { margin-top: 4px; }
+.drawer-sub { font-size: 10.5px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); margin-top: 6px; }
 .data-row .btn { flex: 1; justify-content: center; }
 .drawer-note.err { color: var(--danger); }
 .drawer-note.ok { color: var(--good); }
@@ -1381,6 +1382,17 @@ g.hot .viz-bar { filter: brightness(1.15); }
     </div>
     <div class="drawer-note">The key is stored only in this browser and sent only to api.anthropic.com. Get one at console.anthropic.com.</div>
     <div class="drawer-note" id="aiStatus"></div>
+    <div class="drawer-sub">Cloud sync</div>
+    <div class="api-row">
+      <input id="syncToken" type="password" placeholder="GitHub token (github_pat_…)" autocomplete="off">
+      <button id="syncSave" class="btn btn-outline">Connect</button>
+    </div>
+    <div class="api-row data-row">
+      <button id="syncNow" class="btn btn-outline">Sync now</button>
+      <button id="syncOff" class="btn btn-ghost">Disconnect</button>
+    </div>
+    <div class="drawer-note" id="syncStatus">Not connected.</div>
+    <div class="drawer-sub">Backup</div>
     <div class="api-row data-row">
       <button id="dataExport" class="btn btn-outline">Export data</button>
       <button id="dataImport" class="btn btn-outline">Import data</button>
@@ -1537,7 +1549,13 @@ function migrateStore() {
     }
   }
 }
-function saveStore() { localStorage.setItem(STORE_KEY, JSON.stringify(store)); }
+function saveStore() {
+  if (typeof syncApplying === "undefined" || !syncApplying) {
+    store.meta = { rev: (((store.meta || {}).rev) || 0) + 1, updatedAt: new Date().toISOString() };
+  }
+  localStorage.setItem(STORE_KEY, JSON.stringify(store));
+  if (typeof queueSync === "function") queueSync();
+}
 
 function seedStore() {
   const today = startOfDay(new Date());
@@ -4417,6 +4435,189 @@ function initExtras() {
 
 init();
 initExtras();
+/* ============================================================
+   Cloud sync — the private GitHub repo artyom-ml/calendar-data
+   holds store.json; every device pulls on open/focus and pushes
+   after changes. Newest updatedAt wins on conflict.
+   NOTE: module state uses `var` on purpose — saveStore() can run
+   before this file's top-level executes, and vars hoist safely.
+============================================================ */
+var SYNC_REPO = "artyom-ml/calendar-data";
+var SYNC_FILE = "store.json";
+var SYNC_TOKEN_KEY = "artyom-calendar-sync-token";
+var syncReady = false;
+var syncApplying = false; // suppresses meta bump + re-queue while applying remote data
+var syncDirty = false;    // local changes not yet pushed
+var syncBusy = false;
+var syncSha = null;       // sha of the remote blob we last saw
+var syncTimer = null;
+
+function syncToken() { return localStorage.getItem(SYNC_TOKEN_KEY) || ""; }
+
+function b64encodeUtf8(str) {
+  const bytes = new TextEncoder().encode(str);
+  let bin = "";
+  for (let i = 0; i < bytes.length; i += 0x8000) {
+    bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+  }
+  return btoa(bin);
+}
+function b64decodeUtf8(b64) {
+  const bin = atob(b64.replace(/\s/g, ""));
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return new TextDecoder().decode(bytes);
+}
+
+function ghFetch(method, path, body) {
+  return fetch("https://api.github.com/" + path, {
+    method,
+    headers: Object.assign({
+      Accept: "application/vnd.github+json",
+      Authorization: "Bearer " + syncToken(),
+      "X-GitHub-Api-Version": "2022-11-28",
+    }, body ? { "Content-Type": "application/json" } : {}),
+    body: body ? JSON.stringify(body) : undefined,
+  });
+}
+
+function setSyncStatus(msg, cls) {
+  const n = $("syncStatus");
+  if (!n) return;
+  n.textContent = msg;
+  n.className = "drawer-note" + (cls ? " " + cls : "");
+}
+
+function syncStamp() {
+  const now = new Date();
+  return `Synced · ${fmtTime(now.getHours() * 60 + now.getMinutes())}`;
+}
+
+async function syncPush() {
+  const raw = JSON.stringify(store);
+  const body = {
+    message: "sync " + ((store.meta && store.meta.updatedAt) || ""),
+    content: b64encodeUtf8(raw),
+  };
+  if (syncSha) body.sha = syncSha;
+  const r = await ghFetch("PUT", `repos/${SYNC_REPO}/contents/${SYNC_FILE}`, body);
+  if (r.status === 409 || r.status === 422) {
+    // another device wrote since we last looked — re-read and let pull decide
+    syncSha = null;
+    return syncPull(false);
+  }
+  if (!r.ok) throw new Error(`Push failed (${r.status})`);
+  const j = await r.json();
+  syncSha = j.content.sha;
+  syncDirty = false;
+  setSyncStatus(syncStamp(), "ok");
+}
+
+async function syncPull(manual) {
+  const r = await ghFetch("GET", `repos/${SYNC_REPO}/contents/${SYNC_FILE}`);
+  if (r.status === 404) {
+    // nothing in the cloud yet — seed it with this device's data
+    syncDirty = true;
+    return syncPush();
+  }
+  if (r.status === 401) throw new Error("GitHub rejected the token — check it hasn't expired.");
+  if (!r.ok) throw new Error(`Pull failed (${r.status})`);
+  const j = await r.json();
+  syncSha = j.sha;
+  const raw = b64decodeUtf8(j.content);
+  let remote;
+  try { remote = JSON.parse(raw); } catch (e) { throw new Error("Cloud data is unreadable."); }
+  if (!remote || !Array.isArray(remote.calendars) || !Array.isArray(remote.events)) {
+    // junk in the file (e.g. the initial test blob) — replace with local data
+    syncDirty = true;
+    return syncPush();
+  }
+  const remoteAt = (remote.meta && remote.meta.updatedAt) || "";
+  const localAt = (store.meta && store.meta.updatedAt) || "";
+  if (remoteAt === localAt) {
+    if (syncDirty) return syncPush();
+    setSyncStatus(syncStamp(), "ok");
+    return;
+  }
+  if (syncDirty && localAt > remoteAt) return syncPush();
+  // remote wins — apply it
+  const hadLocalEdits = syncDirty;
+  if (hadLocalEdits) pushUndo();
+  syncApplying = true;
+  try {
+    store = remote;
+    migrateStore();
+    localStorage.setItem(STORE_KEY, JSON.stringify(store));
+  } finally {
+    syncApplying = false;
+  }
+  syncDirty = false;
+  renderAll();
+  if (!$("notesDrawer").hidden) renderNotes();
+  setSyncStatus(syncStamp(), "ok");
+  if (hadLocalEdits) showToast("Cloud version was newer — loaded it", { action: "Undo", onAction: popUndo });
+  else if (manual) showToast("Up to date with the cloud");
+}
+
+async function runSync(manual) {
+  if (!syncToken() || syncBusy) return;
+  if (location.hostname.endsWith("claude.ai") || location.hostname.endsWith("claudeusercontent.com")) {
+    setSyncStatus("Sync isn't available on this hosted preview — use calendar.manulink.com or the apps.", "err");
+    return;
+  }
+  syncBusy = true;
+  setSyncStatus("Syncing…");
+  try {
+    if (syncDirty) await syncPush();
+    else await syncPull(manual);
+  } catch (err) {
+    const msg = err instanceof TypeError ? "Couldn't reach GitHub — offline? Will retry." : (err && err.message) || "Sync failed.";
+    setSyncStatus(msg, "err");
+  } finally {
+    syncBusy = false;
+  }
+}
+
+/* called from saveStore() after every local change */
+function queueSync() {
+  if (!syncReady || syncApplying || !syncToken()) return;
+  syncDirty = true;
+  clearTimeout(syncTimer);
+  syncTimer = setTimeout(() => runSync(false), 2500);
+}
+
+function initSync() {
+  syncReady = true;
+  const tokenIn = $("syncToken");
+  tokenIn.value = syncToken();
+  $("syncSave").addEventListener("click", () => {
+    const v = tokenIn.value.trim();
+    if (!v) { setSyncStatus("Paste a GitHub fine-grained token first.", "err"); return; }
+    localStorage.setItem(SYNC_TOKEN_KEY, v);
+    syncSha = null;
+    runSync(true);
+  });
+  $("syncNow").addEventListener("click", () => runSync(true));
+  $("syncOff").addEventListener("click", () => {
+    localStorage.removeItem(SYNC_TOKEN_KEY);
+    tokenIn.value = "";
+    syncDirty = false;
+    setSyncStatus("Not connected. Data stays on this device only.");
+  });
+  if (syncToken()) {
+    setSyncStatus("Connected.");
+    runSync(false);
+  } else {
+    setSyncStatus("Not connected. Data stays on this device only.");
+  }
+  setInterval(() => { if (syncToken() && !syncBusy && !syncDirty) runSync(false); }, 120000);
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible") runSync(false);
+  });
+  addEventListener("online", () => runSync(false));
+}
+
+initSync();
 if ("serviceWorker" in navigator && location.protocol === "https:") { navigator.serviceWorker.register("sw.js"); }
 </script>
 </body>
