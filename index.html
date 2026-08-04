@@ -4535,8 +4535,8 @@ const AI_SCHEMA = {
           kind: { type: "string", enum: ["create_event", "log_metric", "log_workout", "create_plan", "none"] },
           title: { type: "string" },
           date: { type: "string", description: "YYYY-MM-DD" },
-          start: { type: "string", description: "HH:MM 24h" },
-          end: { type: "string", description: "HH:MM 24h" },
+          start: { type: "string", description: "Start time in 24-hour HH:MM, zero-padded — 7pm is 19:00, 9am is 09:00. Never 12-hour." },
+          end: { type: "string", description: "End time in 24-hour HH:MM, zero-padded — 9pm is 21:00. Never 12-hour." },
           isTask: { type: "boolean", description: "true when the item is a to-do the user will mark complete" },
           notes: { type: "string" },
           metric: { type: "string", enum: ["cal", "water", "sleep", "wt"] },
@@ -4604,6 +4604,20 @@ async function callClaude(systemPrompt, userText) {
   }
 }
 
+// Claude occasionally returns "7:00", "7pm" or "7:30 PM" despite the schema
+// asking for 24-hour HH:MM; parseTimeInput only accepts strict "HH:MM", so
+// anything else silently fell back to 09:00. Accept the loose forms here.
+function parseAiTime(v, fallback) {
+  if (typeof v !== "string") return fallback;
+  const m = v.trim().toLowerCase().match(/^(\d{1,2})[:.]?([0-5]\d)?\s*(a\.?m\.?|p\.?m\.?)?$/);
+  if (!m) return fallback;
+  let h = parseInt(m[1], 10);
+  const min = m[2] ? parseInt(m[2], 10) : 0;
+  if (m[3] && m[3][0] === "p" && h < 12) h += 12;
+  if (m[3] && m[3][0] === "a" && h === 12) h = 0;
+  return h > 23 ? fallback : h * 60 + min;
+}
+
 function applyAiActions(actions) {
   const today = startOfDay(new Date());
   const validDate = s => typeof s === "string" && /^\d{4}-\d{2}-\d{2}$/.test(s);
@@ -4612,8 +4626,8 @@ function applyAiActions(actions) {
     if (!a || typeof a !== "object") continue;
     if (a.kind === "create_event") {
       if (!validDate(a.date)) continue;
-      const sm = parseTimeInput(a.start || "", 540);
-      let em = parseTimeInput(a.end || "", sm + 60);
+      const sm = clamp(parseAiTime(a.start, 540), 0, 1439);
+      let em = clamp(parseAiTime(a.end, sm + 60), 0, 1440);
       if (em <= sm) em = Math.min(sm + 60, 1440);
       store.events.push({
         id: uid(),
@@ -4652,7 +4666,7 @@ function applyAiActions(actions) {
         type,
         name: (a.planName || a.title || woTypeLabel(type)).slice(0, 60),
         days: days.length ? days : [(today.getDay() + 6) % 7],
-        sm: clamp(parseTimeInput(a.start || "", 1080), 0, 1440 - 15),
+        sm: clamp(parseAiTime(a.start, 1080), 0, 1440 - 15),
         dur: clamp(Math.round(a.durationMins || 60), 15, 600),
         interval: clamp(Math.round(a.everyWeeks || 1), 1, 8),
         eventId: null,
@@ -4694,6 +4708,7 @@ async function applyNoteWithAI(note) {
       "You are the scheduling assistant inside a private calendar and habit-tracking app. " +
       "Given one note from the user, decide the concrete actions the app should take and return them as JSON matching the schema. " +
       "Rules: use create_event to book work described in the note into free time — pick slots that do not overlap the existing schedule, prefer 09:00–18:00 on the earliest reasonable day, and honor any timing the note states; mark to-dos as isTask true. " +
+      "All clock times you output must be 24-hour HH:MM: 7pm is 19:00, 7-9pm means start 19:00 end 21:00, 9am is 09:00. " +
       "Use log_metric when the note reports calories eaten (metric cal, kcal), water drunk (metric water, litres), sleep (metric sleep, hours), or body weight (metric wt, kg). " +
       "Use log_workout when the note reports completed exercise. " +
       "Use create_plan when the note asks to set up a recurring workout, training schedule, or program: choose workoutType, weekdays (Monday=0 … Sunday=6), a start time that avoids the existing schedule, durationMins, everyWeeks (usually 1), and exercises as a semicolon-separated string like 'Bench press x4; Squat x5' (name x target sets). When the user asks you to design the program, design it — pick sensible exercises and set counts for their stated goal; emit one create_plan per distinct session (e.g. push day / pull day / leg day are three plans). Don't duplicate plans that already exist. " +
