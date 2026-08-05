@@ -4569,7 +4569,7 @@ async function callClaude(systemPrompt, userText) {
       max_tokens: 16000,
       system: useSchema
         ? systemPrompt
-        : systemPrompt + " Respond with ONLY the JSON object matching the agreed shape — no prose, no code fences.",
+        : systemPrompt + " Respond with ONLY a JSON object that validates against this JSON Schema — exact property names, no prose, no code fences: " + JSON.stringify(AI_SCHEMA),
       messages: [{ role: "user", content: userText }],
     }, useSchema ? { output_config: { format: { type: "json_schema", schema: AI_SCHEMA } } } : {})),
   });
@@ -4579,7 +4579,7 @@ async function callClaude(systemPrompt, userText) {
     let msg = `API error ${res.status}`;
     try { const j = await res.json(); if (j && j.error && j.error.message) msg = j.error.message; } catch (e) {}
     // schema rejected (e.g. "schema is too complex") → retry in plain-JSON mode
-    if (res.status === 400 && /schema|output_config|output_format/i.test(msg)) {
+    if (res.status === 400 && /schema|output_config|output_format|grammar/i.test(msg)) {
       res = await request(false);
       if (!res.ok) {
         let m2 = `API error ${res.status}`;
@@ -4626,8 +4626,8 @@ function applyAiActions(actions) {
     if (!a || typeof a !== "object") continue;
     if (a.kind === "create_event") {
       if (!validDate(a.date)) continue;
-      const sm = clamp(parseAiTime(a.start, 540), 0, 1439);
-      let em = clamp(parseAiTime(a.end, sm + 60), 0, 1440);
+      const sm = clamp(parseAiTime(a.start ?? a.startTime ?? a.time, 540), 0, 1439);
+      let em = clamp(parseAiTime(a.end ?? a.endTime, sm + 60), 0, 1440);
       if (em <= sm) em = Math.min(sm + 60, 1440);
       store.events.push({
         id: uid(),
@@ -4666,7 +4666,7 @@ function applyAiActions(actions) {
         type,
         name: (a.planName || a.title || woTypeLabel(type)).slice(0, 60),
         days: days.length ? days : [(today.getDay() + 6) % 7],
-        sm: clamp(parseAiTime(a.start, 1080), 0, 1440 - 15),
+        sm: clamp(parseAiTime(a.start ?? a.startTime ?? a.time, 1080), 0, 1440 - 15),
         dur: clamp(Math.round(a.durationMins || 60), 15, 600),
         interval: clamp(Math.round(a.everyWeeks || 1), 1, 8),
         eventId: null,
